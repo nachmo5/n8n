@@ -20,6 +20,8 @@ import type { ImportPackageRequest, ImportResult } from '../n8n-packages.types';
 import { packageManifestSchema } from '../spec/manifest.schema';
 import type { SerializedWorkflow } from '../spec/serialized/workflow.schema';
 
+const MEGABYTE_IN_BYTES = 1024 * 1024;
+
 interface ImportTarget {
 	projectId: string;
 	folderId: string | null;
@@ -32,36 +34,38 @@ interface PreparedWorkflow {
 
 @Service()
 export class ImportPipeline {
+	private readonly maxUncompressedPackageBytes: number;
+
 	constructor(
 		private readonly workflowSerializer: WorkflowSerializer,
 		private readonly workflowCreationService: WorkflowCreationService,
-		private readonly globalConfig: GlobalConfig,
+		globalConfig: GlobalConfig,
 		private readonly projectRepository: ProjectRepository,
 		private readonly projectService: ProjectService,
 		private readonly folderService: FolderService,
 		private readonly eventService: EventService,
-	) {}
+	) {
+		this.maxUncompressedPackageBytes = globalConfig.endpoints.payloadSizeMax * MEGABYTE_IN_BYTES;
+	}
 
 	async run(request: ImportPackageRequest): Promise<ImportResult> {
-		const maxUncompressedBytes = this.globalConfig.endpoints.payloadSizeMax * 1024 * 1024;
-		const reader = new TarPackageReader(request.packageBuffer, maxUncompressedBytes);
+		const reader = new TarPackageReader(request.packageBuffer, this.maxUncompressedPackageBytes);
 
 		const manifest = await this.loadPackageManifest(reader);
 
 		const { target } = await this.resolveTarget(request.user, request.projectId, request.folderId);
 
-		// Validate every workflow first so a malformed package aborts before
-		// the first DB write.
+		// Validates every workflow first so a malformed package aborts before the first DB write.
 		const prepared = await this.prepareWorkflows(manifest.workflows ?? [], reader);
 
 		const created: WorkflowEntity[] = [];
 		for (const { entity, sourceId } of prepared) {
-			entity.sourceWorkflowId = sourceId;
 			const saved = await this.workflowCreationService.createWorkflow(request.user, entity, {
 				projectId: target.projectId,
 				parentFolderId: target.folderId ?? undefined,
 				publicApi: true,
 				source: 'import',
+				sourceWorkflowId: sourceId,
 			});
 			created.push(saved);
 		}
@@ -113,25 +117,23 @@ export class ImportPipeline {
 		for (const entry of entries) {
 			const path = `${entry.target}/workflow.json`;
 
-			let content: Buffer;
 			try {
-				content = await reader.readFile(path);
+				const content = await reader.readFile(path);
+				const wire = jsonParse<SerializedWorkflow>(content.toString('utf-8'), {
+					errorMessage: `Package workflow file at ${path} is not valid JSON.`,
+				});
+
+				const partial = this.workflowSerializer.deserialize(wire);
+				const entity = Object.assign(new WorkflowEntity(), partial);
+
+				WorkflowHelpers.validateWorkflowStructure(entity);
+
+				prepared.push({ entity, sourceId: entry.id });
 			} catch (cause) {
 				throw new UserError(`Package manifest references a missing workflow file at ${path}.`, {
 					cause,
 				});
 			}
-
-			const wire = jsonParse<SerializedWorkflow>(content.toString('utf-8'), {
-				errorMessage: `Package workflow file at ${path} is not valid JSON.`,
-			});
-
-			const partial = this.workflowSerializer.deserialize(wire);
-			const entity = Object.assign(new WorkflowEntity(), partial);
-
-			WorkflowHelpers.validateWorkflowStructure(entity);
-
-			prepared.push({ entity, sourceId: entry.id });
 		}
 
 		return prepared;

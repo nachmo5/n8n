@@ -11,9 +11,9 @@ export const manifestEntrySchema = z.object({
 export const packageManifestSchema = z
 	.object({
 		packageFormatVersion: z.literal(FORMAT_VERSION),
-		exportedAt: z.string(),
-		sourceN8nVersion: z.string(),
-		sourceId: z.string(),
+		exportedAt: z.string().datetime(),
+		sourceN8nVersion: z.string().min(1),
+		sourceId: z.string().min(1),
 		workflows: z.array(manifestEntrySchema).optional(),
 	})
 	.superRefine((manifest, ctx) => {

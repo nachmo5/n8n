@@ -7,6 +7,12 @@ import {
 	type SerializedWorkflow,
 } from '../../spec/serialized/workflow.schema';
 
+/** Fields restored from package workflow.json; the target instance assigns the rest. */
+type WorkflowPackageContent = Pick<
+	WorkflowEntity,
+	'name' | 'nodes' | 'connections' | 'isArchived' | 'settings'
+>;
+
 @Service()
 export class WorkflowSerializer {
 	serialize(workflow: WorkflowEntity): SerializedWorkflow {
@@ -32,21 +38,15 @@ export class WorkflowSerializer {
 	 * The content of the workflow comes along, and we keep whichever
 	 * archived state the source had it in.
 	 */
-	deserialize(wire: SerializedWorkflow): Partial<WorkflowEntity> {
-		// The zod schema is a deliberate subset of INode/IConnections — narrower
-		// than the runtime types (no NodeConnectionType brand, fewer optional
-		// fields). The wire has already been zod-validated so the cast is safe.
-		const partial: Partial<WorkflowEntity> = {
+	deserialize(wire: SerializedWorkflow): WorkflowPackageContent {
+		// Package JSON uses a looser shape than our runtime types (e.g. connection type is a
+		// plain string). Zod already checked the shape and content; these casts are safe type conversions.
+		return {
 			name: wire.name,
 			nodes: wire.nodes as INode[],
 			connections: wire.connections as IConnections,
 			isArchived: wire.isArchived,
+			...(wire.settings !== undefined ? { settings: wire.settings } : {}),
 		};
-
-		if (wire.settings !== undefined) {
-			partial.settings = wire.settings;
-		}
-
-		return partial;
 	}
 }
