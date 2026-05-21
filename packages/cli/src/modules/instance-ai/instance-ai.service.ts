@@ -12,7 +12,7 @@ import {
 	type ToolCategory,
 	type TaskList,
 } from '@n8n/api-types';
-import type { Message } from '@n8n/agents';
+import type { Message, RuntimeSkillSource, Workspace } from '@n8n/agents';
 import { Logger } from '@n8n/backend-common';
 import { GlobalConfig, SsrfProtectionConfig, type InstanceAiConfig } from '@n8n/config';
 import { OnLeaderStepdown, OnLeaderTakeover } from '@n8n/decorators';
@@ -28,6 +28,8 @@ import {
 	createAllTools,
 	createSandbox,
 	createWorkspace,
+	createLazyRuntimeSkillSource,
+	createLazyRuntimeWorkspace,
 	getWorkspaceRoot,
 	setupSandboxWorkspace,
 	createInstanceAiTraceContext,
@@ -148,6 +150,11 @@ function isTextMessagePart(part: unknown): part is { type: 'text'; text: string 
 }
 
 const ORCHESTRATOR_AGENT_ID = 'agent-001';
+
+type RuntimeWorkspaceResolution = {
+	workspace: Workspace;
+	runtimeWorkspaceSkills?: RuntimeSkillSource;
+};
 
 function getUserFacingErrorMessage(error: unknown): string {
 	if (error instanceof UserError) {
@@ -648,6 +655,49 @@ export class InstanceAiService {
 		const entry = { sandbox, workspace };
 		this.sandboxes.set(threadId, entry);
 		return entry;
+	}
+
+	private createRuntimeWorkspaceResolver(
+		threadId: string,
+		user: User,
+		context: InstanceAiContext,
+		runtimeSkills: RuntimeSkillSource,
+	): () => Promise<RuntimeWorkspaceResolution | undefined> {
+		let runtimeWorkspacePromise: Promise<RuntimeWorkspaceResolution | undefined> | undefined;
+
+		return async () => {
+			runtimeWorkspacePromise ??= this.materializeRuntimeWorkspace(
+				threadId,
+				user,
+				context,
+				runtimeSkills,
+			);
+			return await runtimeWorkspacePromise;
+		};
+	}
+
+	private async materializeRuntimeWorkspace(
+		threadId: string,
+		user: User,
+		context: InstanceAiContext,
+		runtimeSkills: RuntimeSkillSource,
+	): Promise<RuntimeWorkspaceResolution | undefined> {
+		const sandboxEntry = await this.getOrCreateWorkspace(threadId, user, context);
+		if (!sandboxEntry?.workspace) return undefined;
+
+		const runtimeWorkspaceSkills = (
+			await materializeRuntimeSkillsIntoWorkspace({
+				source: runtimeSkills,
+				workspace: sandboxEntry.workspace,
+				root: await getWorkspaceRoot(sandboxEntry.workspace),
+				logger: this.logger,
+			})
+		)?.source;
+
+		return {
+			workspace: sandboxEntry.workspace,
+			...(runtimeWorkspaceSkills ? { runtimeWorkspaceSkills } : {}),
+		};
 	}
 
 	/** Destroy and remove the shared runtime workspace for a thread. */
@@ -2366,19 +2416,23 @@ export class InstanceAiService {
 			setSchemaBaseDirs(nodeDefDirs);
 		}
 
-		const domainTools = createAllTools(context);
-		const sandboxEntry = await this.getOrCreateWorkspace(threadId, user, context);
 		const runtimeSkills = loadInstanceAiRuntimeSkillSource();
-		const runtimeWorkspaceSkills = sandboxEntry?.workspace
-			? (
-					await materializeRuntimeSkillsIntoWorkspace({
-						source: runtimeSkills,
-						workspace: sandboxEntry.workspace,
-						root: await getWorkspaceRoot(sandboxEntry.workspace),
-						logger: this.logger,
-					})
-				)?.source
+		const shouldExposeRuntimeWorkspace = this.getSandboxConfigFromEnv().enabled;
+		const resolveRuntimeWorkspace = shouldExposeRuntimeWorkspace
+			? this.createRuntimeWorkspaceResolver(threadId, user, context, runtimeSkills)
 			: undefined;
+		const runtimeWorkspace = resolveRuntimeWorkspace
+			? createLazyRuntimeWorkspace({
+					ensureWorkspace: async () => (await resolveRuntimeWorkspace())?.workspace,
+				})
+			: undefined;
+		const runtimeWorkspaceSkills = resolveRuntimeWorkspace
+			? createLazyRuntimeSkillSource({
+					source: runtimeSkills,
+					resolveSource: async () => (await resolveRuntimeWorkspace())?.runtimeWorkspaceSkills,
+				})
+			: runtimeSkills;
+		const domainTools = createAllTools(context);
 
 		const orchestrationContext: OrchestrationContext = {
 			threadId,
@@ -2403,7 +2457,7 @@ export class InstanceAiService {
 				: undefined,
 			localMcpServer: context.localMcpServer,
 			runtimeSkills,
-			runtimeWorkspaceSkills: runtimeWorkspaceSkills ?? runtimeSkills,
+			runtimeWorkspaceSkills,
 			oauth2CallbackUrl: this.oauth2CallbackUrl,
 			webhookBaseUrl: this.webhookBaseUrl,
 			formBaseUrl: this.formBaseUrl,
@@ -2437,7 +2491,7 @@ export class InstanceAiService {
 			sendCorrectionToTask: (taskId, correction) =>
 				this.sendCorrectionToTask(threadId, taskId, correction),
 			workflowTaskService: workflowTasks,
-			workspace: sandboxEntry?.workspace,
+			workspace: runtimeWorkspace,
 			nodeDefinitionDirs: nodeDefDirs.length > 0 ? nodeDefDirs : undefined,
 			domainContext: context,
 			tracingProxyConfig,
@@ -2454,7 +2508,6 @@ export class InstanceAiService {
 			plannedTaskService,
 			modelId,
 			orchestrationContext,
-			sandboxEntry,
 		};
 	}
 
