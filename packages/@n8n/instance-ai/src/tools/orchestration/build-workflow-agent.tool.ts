@@ -50,7 +50,11 @@ import {
 	type WorkflowVerificationReadiness,
 	type WorkflowLoopState,
 } from '../../workflow-loop';
-import { readFileViaSandbox } from '../../workspace/sandbox-fs';
+import {
+	readFileViaSandbox,
+	writeFileViaSandbox,
+	type SandboxWorkspace,
+} from '../../workspace/sandbox-fs';
 import { getWorkspaceRoot } from '../../workspace/sandbox-setup';
 import {
 	CREDENTIALS_TOOL_ID,
@@ -78,6 +82,68 @@ export function getBuilderSessionMemory(
 	useSharedWorkspace: boolean,
 ): OrchestrationContext['memory'] {
 	return useSharedWorkspace ? context.memory : undefined;
+}
+
+const BUILDER_WORK_ITEMS_DIR = 'builder-work-items';
+
+export interface BuilderWorkflowWorkspaceLayout {
+	workItemRoot: string;
+	sourceDir: string;
+	chunksDir: string;
+	mainWorkflowPath: string;
+	tsconfigPath: string;
+	relativeMainWorkflowPath: string;
+}
+
+function safeWorkItemPathSegment(workItemId: string): string {
+	const slug = workItemId
+		.replace(/[^A-Za-z0-9_-]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 48);
+	const hash = createHash('sha256').update(workItemId).digest('hex').slice(0, 8);
+
+	return `${slug || 'work-item'}-${hash}`;
+}
+
+export function builderWorkflowWorkspaceLayout(
+	root: string,
+	workItemId: string,
+): BuilderWorkflowWorkspaceLayout {
+	const relativeWorkItemRoot = `${BUILDER_WORK_ITEMS_DIR}/${safeWorkItemPathSegment(workItemId)}`;
+	const workItemRoot = `${root}/${relativeWorkItemRoot}`;
+
+	return {
+		workItemRoot,
+		sourceDir: `${workItemRoot}/src`,
+		chunksDir: `${workItemRoot}/chunks`,
+		mainWorkflowPath: `${workItemRoot}/src/workflow.ts`,
+		tsconfigPath: `${workItemRoot}/tsconfig.json`,
+		relativeMainWorkflowPath: `${relativeWorkItemRoot}/src/workflow.ts`,
+	};
+}
+
+function renderBuilderTaskTsconfig(): string {
+	return `${JSON.stringify(
+		{
+			extends: '../../tsconfig.json',
+			include: ['src/**/*.ts', 'chunks/**/*.ts'],
+		},
+		null,
+		2,
+	)}\n`;
+}
+
+async function writeBuilderWorkspaceFile(
+	workspace: SandboxWorkspace,
+	filePath: string,
+	content: string,
+): Promise<void> {
+	if (workspace.filesystem) {
+		await workspace.filesystem.writeFile(filePath, content, { recursive: true });
+		return;
+	}
+
+	await writeFileViaSandbox(workspace, filePath, content);
 }
 
 function toToolRegistry(tools: readonly BuiltTool[]): InstanceAiToolRegistry {
@@ -924,6 +990,10 @@ export async function startBuildWorkflowAgentTask(
 
 	const { workflowId } = input;
 	const workItemId = baseWorkItemId;
+	const relativeMainWorkflowPath = builderWorkflowWorkspaceLayout(
+		'',
+		workItemId,
+	).relativeMainWorkflowPath;
 	const builderThreadId = randomUUID();
 	const builderResourceId = createSubAgentResourceId(context.threadId, 'workflow-builder');
 	const builderMemoryBinding: BuilderMemoryBinding = {
@@ -934,7 +1004,7 @@ export async function startBuildWorkflowAgentTask(
 	// Build additional context based on sandbox mode and existing workflow
 	let additionalContext = '';
 	if (useSandbox && workflowId) {
-		additionalContext = `[CONTEXT: Modifying existing workflow ${workflowId}. The current code is pre-loaded in ~/workspace/src/workflow.ts — read it first, then edit. Use workflowId "${workflowId}" when calling submit-workflow.]\n\n[WORK ITEM ID: ${workItemId}]`;
+		additionalContext = `[CONTEXT: Modifying existing workflow ${workflowId}. The current code is pre-loaded in ${relativeMainWorkflowPath} — read it first, then edit. Use workflowId "${workflowId}" when calling submit-workflow.]\n\n[WORK ITEM ID: ${workItemId}]`;
 	} else if (useSandbox) {
 		additionalContext = `[WORK ITEM ID: ${workItemId}]`;
 	} else if (workflowId) {
@@ -1005,32 +1075,39 @@ export async function startBuildWorkflowAgentTask(
 				if (useSandbox && sharedWorkspace && domainContext) {
 					const workspace = sharedWorkspace;
 					const root = await getWorkspaceRoot(workspace);
+					const builderLayout = builderWorkflowWorkspaceLayout(root, workItemId);
 					const runtimeSkills = context.runtimeWorkspaceSkills ?? context.runtimeSkills;
 
-					prompt = createSandboxBuilderAgentPrompt(root);
+					prompt = createSandboxBuilderAgentPrompt(root, {
+						mainWorkflowPath: builderLayout.mainWorkflowPath,
+						sourceDir: builderLayout.sourceDir,
+						chunksDir: builderLayout.chunksDir,
+						tsconfigPath: builderLayout.tsconfigPath,
+					});
+					await writeBuilderWorkspaceFile(
+						workspace,
+						builderLayout.tsconfigPath,
+						renderBuilderTaskTsconfig(),
+					);
 
 					if (workflowId) {
 						try {
 							const json = await domainContext.workflowService.getAsWorkflowJSON(workflowId);
 							const rawCode = generateWorkflowCode(json);
 							const code = `${SDK_IMPORT_STATEMENT}\n\n${rawCode}`;
-							if (workspace.filesystem) {
-								await workspace.filesystem.writeFile(`${root}/src/workflow.ts`, code, {
-									recursive: true,
-								});
-							}
+							await writeBuilderWorkspaceFile(workspace, builderLayout.mainWorkflowPath, code);
 						} catch {
 							// Non-fatal — agent can still build from scratch
 						}
-					} else if (workspace.filesystem) {
-						await workspace.filesystem.writeFile(
-							`${root}/src/workflow.ts`,
+					} else {
+						await writeBuilderWorkspaceFile(
+							workspace,
+							builderLayout.mainWorkflowPath,
 							`${SDK_IMPORT_STATEMENT}\n\n`,
-							{ recursive: true },
 						);
 					}
 
-					const mainWorkflowPath = `${root}/src/workflow.ts`;
+					const mainWorkflowPath = builderLayout.mainWorkflowPath;
 					builderTools.set(
 						'submit-workflow',
 						createIdentityEnforcedSubmitWorkflowTool({
@@ -1038,6 +1115,7 @@ export async function startBuildWorkflowAgentTask(
 							workspace,
 							credentialMap: credMap,
 							root,
+							defaultFilePath: mainWorkflowPath,
 							currentRunId: context.runId,
 							getWorkflowLoopState: async () =>
 								await context.workflowTaskService?.getWorkflowLoopState(workItemId),
@@ -1182,7 +1260,7 @@ export async function startBuildWorkflowAgentTask(
 					const currentMainWorkflowHash = hashContent(currentMainWorkflow);
 
 					if (!mainWorkflowAttempt) {
-						const text = 'Error: workflow builder finished without submitting /src/workflow.ts.';
+						const text = `Error: workflow builder finished without submitting ${mainWorkflowPath}.`;
 						return {
 							text,
 							outcome: buildOutcome(workItemId, context.runId, taskId, undefined, text),
@@ -1209,7 +1287,7 @@ export async function startBuildWorkflowAgentTask(
 
 						const errorText =
 							mainWorkflowAttempt.errors?.join(' ') ?? 'Unknown submit-workflow failure.';
-						const text = `Error: workflow builder stopped after a failed submit-workflow for /src/workflow.ts. ${errorText}`;
+						const text = `Error: workflow builder stopped after a failed submit-workflow for ${mainWorkflowPath}. ${errorText}`;
 						return {
 							text,
 							outcome: buildOutcome(workItemId, context.runId, taskId, mainWorkflowAttempt, text),
@@ -1291,7 +1369,7 @@ export async function startBuildWorkflowAgentTask(
 									return await finalizeBuildResult(context, workItemId, recovered);
 								}
 							}
-							const text = `Error: auto-re-submit of edited /src/workflow.ts failed. ${resubmitErrors}`;
+							const text = `Error: auto-re-submit of edited ${mainWorkflowPath} failed. ${resubmitErrors}`;
 							return {
 								text,
 								outcome: buildOutcome(

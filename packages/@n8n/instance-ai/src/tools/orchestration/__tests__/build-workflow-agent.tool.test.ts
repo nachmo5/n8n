@@ -30,6 +30,7 @@ const {
 	determineSetupRequirement,
 	determineVerificationReadiness,
 	getBuilderSessionMemory,
+	builderWorkflowWorkspaceLayout,
 	mergeLatestVerificationIntoOutcome,
 	supportingWorkflowIdsFromSubmitAttempts,
 } =
@@ -103,6 +104,32 @@ function createSpawnableContext(
 }
 
 const MAIN_PATH = '/home/daytona/workspace/src/workflow.ts';
+
+describe('builderWorkflowWorkspaceLayout', () => {
+	it('gives parallel work items isolated main workflow files in the shared workspace', () => {
+		const root = '/home/daytona/workspace';
+		const first = builderWorkflowWorkspaceLayout(root, 'wi_fetch_customers');
+		const second = builderWorkflowWorkspaceLayout(root, 'wi_send_report');
+
+		expect(first.mainWorkflowPath).toBe(`${first.workItemRoot}/src/workflow.ts`);
+		expect(second.mainWorkflowPath).toBe(`${second.workItemRoot}/src/workflow.ts`);
+		expect(first.mainWorkflowPath).not.toBe(second.mainWorkflowPath);
+		expect(first.chunksDir).not.toBe(second.chunksDir);
+		expect(first.tsconfigPath).toBe(`${first.workItemRoot}/tsconfig.json`);
+		expect(first.relativeMainWorkflowPath).not.toContain('..');
+	});
+
+	it('sanitizes work item ids before using them in workspace paths', () => {
+		const layout = builderWorkflowWorkspaceLayout(
+			'/home/daytona/workspace',
+			'run:one/../../workflow',
+		);
+
+		expect(layout.relativeMainWorkflowPath).toMatch(
+			/^builder-work-items\/run-one-workflow-[a-f0-9]{8}\/src\/workflow\.ts$/,
+		);
+	});
+});
 
 describe('buildWarmBuilderFollowUp', () => {
 	it('keeps the detached builder verification contract in warm follow-ups', () => {

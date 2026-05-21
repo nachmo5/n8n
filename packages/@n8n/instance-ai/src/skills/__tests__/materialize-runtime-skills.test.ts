@@ -1,4 +1,10 @@
-import { createSkillViewTool, type Workspace } from '@n8n/agents';
+import {
+	RUNTIME_SKILL_REGISTRY_SCHEMA_VERSION,
+	createSkillViewTool,
+	type RuntimeSkillLinkedFiles,
+	type RuntimeSkillSource,
+	type Workspace,
+} from '@n8n/agents';
 import { jsonParse } from 'n8n-workflow';
 
 import {
@@ -27,6 +33,51 @@ function createMockWorkspace() {
 			filesystem: { writeFile },
 			sandbox,
 		} as unknown as Workspace,
+	};
+}
+
+function emptyLinkedFiles(): RuntimeSkillLinkedFiles {
+	return {
+		references: [],
+		templates: [],
+		scripts: [],
+		assets: [],
+		examples: [],
+		other: [],
+	};
+}
+
+function createRuntimeSkillSourceWithLinkedFile(path: string): RuntimeSkillSource {
+	const linkedFiles = emptyLinkedFiles();
+	linkedFiles.references.push({ path, bytes: 6, sha256: 'sha' });
+
+	return {
+		registry: {
+			schemaVersion: RUNTIME_SKILL_REGISTRY_SCHEMA_VERSION,
+			skillsHash: 'hash',
+			skills: [
+				{
+					id: 'test-skill',
+					name: 'test-skill',
+					description: 'Test skill',
+					hash: 'hash',
+					linkedFiles,
+				},
+			],
+		},
+		loadSkill: async () =>
+			await Promise.resolve({
+				id: 'test-skill',
+				name: 'test-skill',
+				description: 'Test skill',
+				instructions: 'Use the linked file.',
+			}),
+		loadFile: async (skillId, filePath) =>
+			await Promise.resolve({
+				skillId,
+				filePath,
+				content: 'linked',
+			}),
 	};
 }
 
@@ -104,5 +155,18 @@ describe('materializeRuntimeSkillsIntoWorkspace', () => {
 		expect(result.content).toContain(
 			`${root}/${SANDBOX_RUNTIME_SKILLS_DIR}/workflow-auditor/scripts/audit-workflow.mjs`,
 		);
+	});
+
+	it('rejects linked file paths that escape the materialized skill directory', async () => {
+		const source = createRuntimeSkillSourceWithLinkedFile('../outside.md');
+		const { workspace } = createMockWorkspace();
+
+		await expect(
+			materializeRuntimeSkillsIntoWorkspace({
+				source,
+				workspace,
+				root: '/home/daytona/workspace',
+			}),
+		).rejects.toThrow('Runtime skill linked file escapes skill directory');
 	});
 });

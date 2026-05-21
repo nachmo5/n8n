@@ -87,6 +87,39 @@ function materializedSkillDirectory(root: string, entry: RuntimeSkillRegistryEnt
 	return posixJoin(root, SANDBOX_RUNTIME_SKILLS_DIR, safeSkillDirectory(entry));
 }
 
+function safeLinkedFilePath(
+	directory: string,
+	entry: RuntimeSkillRegistryEntry,
+	linkedFile: RuntimeSkillLinkedFile,
+): { relativePath: string; materializedPath: string } {
+	const raw = linkedFile.path;
+	if (
+		!raw ||
+		raw.trim() === '' ||
+		raw.includes('\0') ||
+		raw.includes('\\') ||
+		raw.startsWith('/')
+	) {
+		throw new Error(`Invalid runtime skill linked file for "${entry.name}": ${raw}`);
+	}
+
+	const relativePath = posixNormalize(raw);
+	const materializedPath = posixNormalize(posixJoin(directory, relativePath));
+	const directoryBoundary = directory.endsWith('/') ? directory : `${directory}/`;
+	if (
+		relativePath === '.' ||
+		relativePath.startsWith('../') ||
+		materializedPath === directory ||
+		!materializedPath.startsWith(directoryBoundary)
+	) {
+		throw new Error(
+			`Runtime skill linked file escapes skill directory for "${entry.name}": ${raw}`,
+		);
+	}
+
+	return { relativePath, materializedPath };
+}
+
 function substituteRuntimeSkillVars(
 	content: string,
 	skillDir: string,
@@ -322,7 +355,8 @@ export async function materializeRuntimeSkillsIntoWorkspace({
 		}
 
 		for (const linkedFile of linkedFiles) {
-			const content = await source.loadFile?.(entry.id, linkedFile.path);
+			const { relativePath, materializedPath } = safeLinkedFilePath(directory, entry, linkedFile);
+			const content = await source.loadFile?.(entry.id, relativePath);
 			if (!content) {
 				throw new Error(
 					`Runtime skill "${entry.name}" linked file is registered but cannot be loaded: ${linkedFile.path}`,
@@ -331,7 +365,7 @@ export async function materializeRuntimeSkillsIntoWorkspace({
 
 			await writeWorkspaceFile(
 				workspace,
-				posixJoin(directory, linkedFile.path),
+				materializedPath,
 				substituteRuntimeSkillVars(content.content, directory, root),
 			);
 		}
