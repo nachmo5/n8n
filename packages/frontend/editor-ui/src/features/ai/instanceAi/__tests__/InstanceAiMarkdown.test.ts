@@ -8,7 +8,8 @@ import type { ResourceEntry } from '../useResourceRegistry';
 // Stub ChatMarkdownChunk to expose the processed content as plain text
 vi.mock('@/features/ai/chatHub/components/ChatMarkdownChunk.vue', () => ({
 	default: {
-		template: '<div data-test-id="markdown-output">{{ source.content }}</div>',
+		template:
+			'<div data-test-id="markdown-output" :data-source-type="source.type">{{ source.type === "text" ? source.content : source.command?.title }}</div>',
 		props: ['source'],
 	},
 }));
@@ -46,6 +47,30 @@ describe('InstanceAiMarkdown', () => {
 	it('should return content unchanged when registry is empty', () => {
 		const result = getProcessedContent('Hello world');
 		expect(result).toBe('Hello world');
+	});
+
+	it('should parse artifact commands instead of exposing raw command markup', () => {
+		const { getAllByTestId } = renderComponent({
+			props: {
+				content: `Summary first.
+<command:artifact-create>
+<title>Workflow audit</title>
+<type>md</type>
+<content># Full audit</content>
+</command:artifact-create>`,
+			},
+		});
+		const chunks = getAllByTestId('markdown-output');
+
+		expect(chunks.map((chunk) => chunk.getAttribute('data-source-type'))).toEqual([
+			'text',
+			'artifact-create',
+		]);
+		expect(chunks[0]).toHaveTextContent('Summary first.');
+		expect(chunks[1]).toHaveTextContent('Workflow audit');
+		expect(chunks.map((chunk) => chunk.textContent).join('')).not.toContain(
+			'<command:artifact-create>',
+		);
 	});
 
 	it('should replace resource name with n8n-resource link', () => {

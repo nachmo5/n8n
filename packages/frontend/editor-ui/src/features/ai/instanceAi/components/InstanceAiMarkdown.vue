@@ -1,6 +1,7 @@
 <script lang="ts" setup>
+import { parseMessage } from '@n8n/chat-hub';
 import ChatMarkdownChunk from '@/features/ai/chatHub/components/ChatMarkdownChunk.vue';
-import type { ComponentPublicInstance } from 'vue';
+import type { ChatMessageContentChunk } from '@n8n/api-types';
 import { computed, inject, onBeforeUnmount, onMounted, onUpdated, ref, useCssModule } from 'vue';
 import { useThread } from '../instanceAi.store';
 
@@ -10,7 +11,11 @@ const props = defineProps<{
 
 const thread = useThread();
 const styles = useCssModule();
-const wrapperRef = ref<ComponentPublicInstance | null>(null);
+const wrapperRef = ref<HTMLElement | null>(null);
+const openChatArtifact = inject<((title?: string) => void) | undefined>(
+	'openChatArtifact',
+	undefined,
+);
 
 /**
  * Preview openers — return true when they switched the preview tab, false
@@ -100,10 +105,13 @@ const processedContent = computed(() => {
 	return result;
 });
 
-const source = computed(() => ({
-	type: 'text' as const,
-	content: processedContent.value,
-}));
+const sources = computed<ChatMessageContentChunk[]>(() =>
+	parseMessage({ type: 'ai', content: processedContent.value }),
+);
+
+function handleOpenArtifact(title: string): void {
+	openChatArtifact?.(title);
+}
 
 /** Route patterns that map internal n8n URLs to resource types. */
 const INTERNAL_ROUTE_PATTERNS: Array<{ pattern: RegExp; type: string }> = [
@@ -161,7 +169,7 @@ const linkHandlers = new WeakMap<HTMLAnchorElement, (e: MouseEvent) => void>();
 function enhanceResourceLinks(): void {
 	if (!wrapperRef.value) return;
 
-	const allLinks = (wrapperRef.value.$el as HTMLElement).querySelectorAll<HTMLAnchorElement>('a');
+	const allLinks = wrapperRef.value.querySelectorAll<HTMLAnchorElement>('a');
 
 	for (const link of allLinks) {
 		// Already enhanced — skip
@@ -225,7 +233,7 @@ function enhanceResourceLinks(): void {
 /** Remove click handlers from all enhanced links. */
 function cleanupLinkHandlers(): void {
 	if (!wrapperRef.value) return;
-	const allLinks = (wrapperRef.value.$el as HTMLElement).querySelectorAll<HTMLAnchorElement>('a');
+	const allLinks = wrapperRef.value.querySelectorAll<HTMLAnchorElement>('a');
 	for (const link of allLinks) {
 		const handler = linkHandlers.get(link);
 		if (handler) {
@@ -244,7 +252,14 @@ onBeforeUnmount(cleanupLinkHandlers);
 </script>
 
 <template>
-	<ChatMarkdownChunk ref="wrapperRef" :source="source" />
+	<div ref="wrapperRef">
+		<ChatMarkdownChunk
+			v-for="(source, index) in sources"
+			:key="index"
+			:source="source"
+			@open-artifact="handleOpenArtifact"
+		/>
+	</div>
 </template>
 
 <style lang="scss" module>

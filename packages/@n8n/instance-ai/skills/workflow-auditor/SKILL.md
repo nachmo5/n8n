@@ -24,14 +24,28 @@ node ${N8N_SKILL_DIR}/scripts/audit-workflow.mjs <workflow-json-path>
 ```
 
 4. Read `${N8N_WORKSPACE_DIR}/workflow-audit-helper.json`.
-5. Write the final human-readable audit to
-   `${N8N_WORKSPACE_DIR}/workflow-audit.md`.
+5. Prepare the final human-readable audit as a markdown artifact in your final
+   response. Do not mention `${N8N_WORKSPACE_DIR}` or any other sandbox path to
+   the user.
 6. Report the top risks, recommended fixes, and whether the workflow is safe to
    activate.
 
 ## Output
 
-Keep the final response short and operational:
+Create the full audit as a markdown artifact using this exact command format:
+
+```text
+<command:artifact-create>
+<title>Workflow audit</title>
+<type>md</type>
+<content>
+...full audit markdown...
+</content>
+</command:artifact-create>
+```
+
+After the artifact command, keep the visible final response short and
+operational:
 
 - activation verdict: safe, risky, or unsafe
 - top production risks
