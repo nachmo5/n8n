@@ -77,4 +77,32 @@ describe('createLazyRuntimeSkillSource', () => {
 		expect(file?.content).toBe('file:scripts/audit.ts');
 		expect(baseSource.loadSkill).not.toHaveBeenCalled();
 	});
+
+	it('surfaces workspace materialization failures instead of loading bundled skills', async () => {
+		const baseSource = createRuntimeSkillSource('base');
+		const resolveError = new Error('sandbox unavailable');
+		const lazySource = createLazyRuntimeSkillSource({
+			source: baseSource,
+			resolveSource: jest.fn(async () => {
+				await Promise.resolve();
+				throw resolveError;
+			}),
+		});
+
+		await expect(lazySource.loadSkill('workflow-auditor')).rejects.toThrow(resolveError);
+		expect(baseSource.loadSkill).not.toHaveBeenCalled();
+	});
+
+	it('requires a materialized workspace-backed source when loading a skill', async () => {
+		const baseSource = createRuntimeSkillSource('base');
+		const lazySource = createLazyRuntimeSkillSource({
+			source: baseSource,
+			resolveSource: jest.fn(async () => await Promise.resolve(undefined)),
+		});
+
+		await expect(lazySource.loadSkill('workflow-auditor')).rejects.toThrow(
+			'Runtime skills require a sandbox workspace',
+		);
+		expect(baseSource.loadSkill).not.toHaveBeenCalled();
+	});
 });

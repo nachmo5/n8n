@@ -2418,20 +2418,21 @@ export class InstanceAiService {
 
 		const runtimeSkills = loadInstanceAiRuntimeSkillSource();
 		const shouldExposeRuntimeWorkspace = this.getSandboxConfigFromEnv().enabled;
-		const resolveRuntimeWorkspace = shouldExposeRuntimeWorkspace
-			? this.createRuntimeWorkspaceResolver(threadId, user, context, runtimeSkills)
-			: undefined;
-		const runtimeWorkspace = resolveRuntimeWorkspace
+		const resolveRuntimeWorkspace = this.createRuntimeWorkspaceResolver(
+			threadId,
+			user,
+			context,
+			runtimeSkills,
+		);
+		const runtimeWorkspace = shouldExposeRuntimeWorkspace
 			? createLazyRuntimeWorkspace({
 					ensureWorkspace: async () => (await resolveRuntimeWorkspace())?.workspace,
 				})
 			: undefined;
-		const runtimeWorkspaceSkills = resolveRuntimeWorkspace
-			? createLazyRuntimeSkillSource({
-					source: runtimeSkills,
-					resolveSource: async () => (await resolveRuntimeWorkspace())?.runtimeWorkspaceSkills,
-				})
-			: runtimeSkills;
+		const runtimeWorkspaceSkills = createLazyRuntimeSkillSource({
+			source: runtimeSkills,
+			resolveSource: async () => (await resolveRuntimeWorkspace())?.runtimeWorkspaceSkills,
+		});
 		const domainTools = createAllTools(context);
 
 		const orchestrationContext: OrchestrationContext = {

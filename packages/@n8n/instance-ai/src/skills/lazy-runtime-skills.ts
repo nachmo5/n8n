@@ -18,7 +18,13 @@ export function createLazyRuntimeSkillSource({
 	let resolvedSourcePromise: Promise<RuntimeSkillSource> | undefined;
 
 	const getResolvedSource = async () => {
-		resolvedSourcePromise ??= resolveSource().then((resolvedSource) => resolvedSource ?? source);
+		resolvedSourcePromise ??= resolveSource().then((resolvedSource) => {
+			if (!resolvedSource) {
+				throw new Error('Runtime skills require a sandbox workspace, but none is available.');
+			}
+
+			return resolvedSource;
+		});
 		return await resolvedSourcePromise;
 	};
 
